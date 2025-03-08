@@ -14,6 +14,7 @@ from verl import DataProto
 from verl.utils.tracking import Tracking
 import shutil
 import requests
+from search_r1.tools.tools import search_mathlib4  # Import the search function from tools.py
 
 @dataclass
 class GenerationConfig:
@@ -26,6 +27,7 @@ class GenerationConfig:
     num_gpus: int
     no_think_rl: bool=False
     search_url: str = None
+    verify_url: str = None  # New field for the verify endpoint
     topk: int = 3
 
 class LLMGenerationManager:
@@ -70,6 +72,8 @@ class LLMGenerationManager:
                  if '</search>' in resp 
                  else resp.split('</answer>')[0] + '</answer>'
                  if '</answer>' in resp 
+                 else resp.split('</verify>')[0] + '</verify>'  # Add handling for verify action
+                 if '</verify>' in resp 
                  else resp
                  for resp in responses_str]
 
@@ -305,7 +309,7 @@ class LLMGenerationManager:
         
         return final_output
 
-    def execute_predictions(self, predictions: List[str], pad_token: str, active_mask=None, do_search=True) -> List[str]:
+    def execute_predictions(self, predictions: List[str], pad_token: str, active_mask=None, do_search=True, do_verify=False) -> List[str]:
         """
         Execute predictions across multiple environments.
         NOTE: the function is the actual `step` function in the environment
@@ -328,6 +332,13 @@ class LLMGenerationManager:
             assert len(search_results) == sum([1 for action in cur_actions if action == 'search'])
         else:
             search_results = [''] * sum([1 for action in cur_actions if action == 'search'])
+            
+        verify_codes = [content for action, content in zip(cur_actions, contents) if action == 'verify']
+        if do_verify:
+            verify_results = self.batch_verify(verify_codes)
+            assert len(verify_results) == sum([1 for action in cur_actions if action == 'verify'])
+        else:
+            verify_results = [''] * sum([1 for action in cur_actions if action == 'verify'])
 
         for i, (action, active) in enumerate(zip(cur_actions, active_mask)):
             
@@ -341,13 +352,18 @@ class LLMGenerationManager:
                 elif action == 'search':
                     next_obs.append(f'\n\n<information>{search_results.pop(0).strip()}</information>\n\n')
                     dones.append(0)
+                elif action == 'verify':
+                    next_obs.append(f'\n\n<verification>{verify_results.pop(0).strip()}</verification>\n\n')
+                    dones.append(0)
                 else:
                     next_obs.append(f'\nMy previous action is invalid. \
 If I want to search, I should put the query between <search> and </search>. \
+If I want to verify code, I should put the code between <verify> and </verify>. \
 If I want to give the final answer, I should put the answer between <answer> and </answer>. Let me try again.\n')
                     dones.append(0)
             
         assert len(search_results) == 0
+        assert len(verify_results) == 0
             
         return next_obs, dones
 
@@ -366,7 +382,7 @@ If I want to give the final answer, I should put the answer between <answer> and
                 
         for prediction in predictions:
             if isinstance(prediction, str): # for llm output
-                pattern = r'<(search|answer)>(.*?)</\1>'
+                pattern = r'<(search|answer|verify)>(.*?)</\1>'  # Updated pattern to include verify
                 match = re.search(pattern, prediction, re.DOTALL)
                 if match:
                     content = match.group(2).strip()  # Return only the content inside the tags
@@ -395,22 +411,35 @@ If I want to give the final answer, I should put the answer between <answer> and
         return [self._passages2string(result) for result in results]
 
     def _batch_search(self, queries):
-        
-        payload = {
-            "queries": queries,
-            "topk": self.config.topk,
-            "return_scores": True
-        }
-        
-        return requests.post(self.config.search_url, json=payload).json()
+        # Use the search_mathlib4 function from tools.py instead of direct request
+        return search_mathlib4(
+            query=queries,
+            num_results=self.config.topk
+        )
 
     def _passages2string(self, retrieval_result):
         format_reference = ''
-        for idx, doc_item in enumerate(retrieval_result):
-            
-            content = doc_item['document']['contents']
-            title = content.split("\n")[0]
-            text = "\n".join(content.split("\n")[1:])
-            format_reference += f"Doc {idx+1}(Title: {title}) {text}\n"
+        for idx, theorem_item in enumerate(retrieval_result):
+            theorem_name = theorem_item['Formal name']
+            theorem_text = theorem_item['Formal statement']
+            format_reference += f"Theorem {idx+1}(Name: {theorem_name}) {theorem_text}\n"
 
         return format_reference
+
+    def batch_verify(self, codes: List[str] = None) -> List[str]:
+        """
+        Batchified verification for code snippets.
+        Args:
+            codes: code snippets to verify with the compiler
+        Returns:
+            verification results as a list of strings
+        """
+        # TODO: Implement the actual code verification logic
+        # This would connect to a compiler service specified by self.config.verify_url
+        # Similar to batch_search but for code verification
+        
+        if not codes:
+            return []
+            
+        # Placeholder implementation
+        return ["Code verification not implemented yet"] * len(codes)
